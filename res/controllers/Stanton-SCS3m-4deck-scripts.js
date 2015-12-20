@@ -16,10 +16,11 @@
 // amidi -p hw:1 -S 900302 # 90: note on, 03: id of a touch button, 02: red LED
 
 SCS3M = {
-    // The device stays in the EQ or FX mode on deck switch
-    // Set this to true if you prefer the device to remember
-    // the mode per-deck and switch to that mode on deck switch.
-    eqModePerDeck: false,
+    // The device remembers the selected EQ/FX mode per deck
+    // and switches to that mode on deck-switch. Set this to
+    // false if you prefer the mode to stay the same on
+    // deck-switch.
+    eqModePerDeck: true,
 };
 
 SCS3M.init = function(id) {
@@ -86,18 +87,29 @@ SCS3M.Device = function() {
             },
             bar: function(value) {
                 return [CC, id, 0x28 + zeroclamped(value)];
-            }
+            },
+            expand: function(value) {
+                return [CC, id, 0x3C + zeroclamped(value)];
+            },
         };
     }
 
-    function Slider(id, lights) {
+    function Slider(id, lights, fields) {
+        var touchfields = {};
+        for (var fieldn in fields) {
+            touchfields[fieldn] = {
+                touch: [NoteOn, fields[fieldn]],
+                release: [NoteOff, fields[fieldn]],
+            };
+        }
         return {
             meter: Meter(id, lights),
             slide: [CC, id],
             mode: {
                 absolute: [[CM, id, 0x70], [CM, id, 0x7F]],
                 relative: [[CM, id, 0x71], [CM, id, 0x7F]],
-            }
+            },
+            field: touchfields,
         };
     }
 
@@ -138,7 +150,11 @@ SCS3M.Device = function() {
         }
 
         function Pitch() {
-            return Slider(either(0x00, 0x01), 7);
+            return Slider(either(0x00, 0x01), 7, {
+                left:   either(0x51, 0x54),
+                middle: either(0x52, 0x55),
+                right:  either(0x53, 0x56),
+            });
         }
 
         function Eq() {
@@ -448,6 +464,12 @@ SCS3M.Agent = function(device) {
         };
     }
 
+    function setconst(channel, control, value) {
+        return function() {
+            engine.setParameter(channel, control, value);
+        };
+    }
+
     function reset(channel, control) {
         return function() {
             engine.reset(channel, control);
@@ -455,10 +477,13 @@ SCS3M.Agent = function(device) {
     }
 
     // relative control
-    function budge(channel, control) {
+    function budge(channel, control, factor) {
+        if (factor === undefined) factor = 1;
+        var mult = factor / 128;
+
         return function(offset) {
             engine.setValue(channel, control,
-                engine.getValue(channel, control) + (offset - 64) / 128
+                engine.getValue(channel, control) + (offset - 64) * mult
             );
         };
     }
@@ -487,19 +512,20 @@ SCS3M.Agent = function(device) {
             },
             'hold': function(onHeld) {
                 return function() {
-                    heldBegin = new Date();
-                    var switchExpire = engine.beginTimer(110, function() {
+                    heldBegin = true;
+                    var switchExpire = engine.beginTimer(200, function() {
                         engine.stopTimer(switchExpire);
                         if (heldBegin) {
+                            heldBegin = false;
                             held = true;
                             onHeld();
                         }
                     });
-                }
+                };
             },
             'release': function() {
-                var change = heldBegin && (new Date() - heldBegin) < 200;
-                if (change) engaged = !engaged;
+                var change = heldBegin;
+                if (heldBegin) engaged = !engaged;
                 held = false;
                 heldBegin = false;
                 return change;
@@ -577,8 +603,8 @@ SCS3M.Agent = function(device) {
     };
 
     var touchheld = {
-        left: Switch(),
-        right: Switch()
+        left: Multiswitch('none'),
+        right: Multiswitch('none')
     };
 
     function remap() {
@@ -601,26 +627,9 @@ SCS3M.Agent = function(device) {
             var part = device[side];
             var deckside = deck[side];
 
-            // Light the top half or bottom half of the EQ sliders to show chosen deck
-            function deckflash(handler) {
-                return function(value) {
-                    var changed = handler(value);
-                    if (!changed) return;
-
-                    var lightval = deckside.choose(1, 0); // First deck is the upper one
-                    tell(part.eq.high.meter.centerbar(lightval));
-                    tell(part.eq.mid.meter.centerbar(lightval));
-                    tell(part.eq.low.meter.centerbar(lightval));
-
-                    // hack: use modeset to cause a delay before the lights are
-                    // reset
-                    modeset([]);
-                };
-            }
-
             // Switch deck/channel when button is touched
             expect(part.deck.touch, deckside.hold(remap));
-            expect(part.deck.release, deckflash(repatch(deckside.release)));
+            expect(part.deck.release, repatch(deckside.release));
 
             function either(left, right) {
                 return (side === 'left') ? left : right;
@@ -628,7 +637,7 @@ SCS3M.Agent = function(device) {
 
             var channelno = deck[side].choose(either(1, 2), either(3, 4));
             var channel = '[Channel' + channelno + ']';
-            var effectchannel = '[QuickEffectRack1_[Channel' + channelno + ']]';
+            var effectchannel = '[QuickEffectRack1_' + channel + ']';
             var eqsideheld = eqheld[side];
             var touchsideheld = touchheld[side];
             var sideoverlay = overlay[side][deckside.choose(0, 1)];
@@ -656,10 +665,10 @@ SCS3M.Agent = function(device) {
             ], patch(beatlight(part.deck.light, deckside.choose(0, 1), deckside.held())));
 
             if (!master.engaged()) {
-                modeset(part.pitch.mode.absolute);
                 if (sideoverlay.engaged('eq')) {
+                    modeset(part.pitch.mode.relative);
                     expect(part.pitch.slide, eqsideheld.choose(
-                        set(effectchannel, 'super1'),
+                        budge(effectchannel, 'super1', 0.5),
                         reset(effectchannel, 'super1')
                     ));
                     watch(effectchannel, 'super1', offcenter(patch(part.pitch.meter.centerbar)));
@@ -680,9 +689,7 @@ SCS3M.Agent = function(device) {
 
             expect(part.modes.eq.touch, repatch(function() {
                 eqsideheld.engage();
-                if (!touchsideheld.engaged()) {
-                    sideoverlay.cancel();
-                }
+                sideoverlay.cancel();
             }));
             expect(part.modes.eq.release, repatch(eqsideheld.cancel));
             tell(part.modes.eq.light[eqsideheld.choose(sideoverlay.choose('eq', 'blue', 'red'), 'purple')]);
@@ -702,12 +709,10 @@ SCS3M.Agent = function(device) {
                 if (fxsideheld.engaged() || master.engaged()) {
                     expect(touch.touch, toggle(effectunit, effectunit_enable));
                 } else {
-                    (function(tnr) { // close over tnr
-                        expect(touch.touch, repatch(function() {
-                            sideoverlay.engage(tnr);
-                            touchsideheld.engage();
-                        }));
-                    }(tnr));
+                    expect(touch.touch, repatch(function() {
+                        sideoverlay.engage(tnr);
+                        touchsideheld.engage(tnr);
+                    }));
                 }
                 expect(touch.release, repatch(touchsideheld.cancel));
 
@@ -724,11 +729,26 @@ SCS3M.Agent = function(device) {
                 }
 
                 if (sideoverlay.engaged(tnr)) {
-                    expect(part.pitch.slide, eqsideheld.choose(
-                        set(effectunit, 'mix'),
-                        reset(effectunit, 'mix')
-                    ));
-                    watch(effectunit, 'mix', patch(part.pitch.meter.bar));
+                    // Select effect by touching top slider when button is held
+                    // Otherwise the top slider controls effect wet/dry
+                    if (touchsideheld.engaged(tnr)) {
+                        tell(part.pitch.meter.expand(0.3));
+                        expect(
+                            part.pitch.field.left.touch,
+                            setconst(effectunit, 'chain_selector', 1)
+                        );
+                        expect(
+                            part.pitch.field.right.touch,
+                            setconst(effectunit, 'chain_selector', -1)
+                        );
+                    } else {
+                        modeset(part.pitch.mode.absolute);
+                        expect(part.pitch.slide, eqsideheld.choose(
+                            set(effectunit, 'mix'),
+                            reset(effectunit, 'mix')
+                        ));
+                        watch(effectunit, 'mix', patch(part.pitch.meter.bar));
+                    }
 
                     expect(part.eq.high.slide, fxsideheld.choose(
                         set(effectunit_effect, 'parameter3'),
@@ -755,7 +775,7 @@ SCS3M.Agent = function(device) {
             expect(part.modes.fx.touch, repatch(fxsideheld.engage));
             expect(part.modes.fx.release, repatch(fxsideheld.cancel));
             tell(part.modes.fx.light[fxsideheld.choose(
-                sideoverlay.choose('eq', 'red', 'blue'),
+                sideoverlay.choose('eq', 'red', 'black'),
                 'purple'
             )]);
 
@@ -801,11 +821,13 @@ SCS3M.Agent = function(device) {
         expect(device.master.touch, repatch(master.engage));
         expect(device.master.release, repatch(master.cancel));
         if (master.engaged()) {
+            modeset(device.left.pitch.mode.absolute);
             watch("[Master]", "headMix", patch(device.left.pitch.meter.centerbar));
             expect(device.left.pitch.slide,
                 eqheld.left.engaged() || fxheld.left.engaged() ? reset('[Master]', 'headMix') : set('[Master]', 'headMix')
             );
 
+            modeset(device.right.pitch.mode.absolute);
             watch("[Master]", "balance", patch(device.right.pitch.meter.centerbar));
             expect(device.right.pitch.slide,
                 eqheld.right.engaged() || fxheld.right.engaged() ? reset('[Master]', 'balance') : set('[Master]', 'balance')
@@ -823,7 +845,7 @@ SCS3M.Agent = function(device) {
             watch("[Master]", "VuMeterR", vupatch(device.right.meter.bar));
         }
 
-        if (deck['left'].held() || deck['right'].held()) {
+        if (deck.left.held() || deck.right.held()) {
             // Needledrop handled in Side()
         } else {
             expect(device.crossfader.slide, set("[Master]", "crossfader"));
