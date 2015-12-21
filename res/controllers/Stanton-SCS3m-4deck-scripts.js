@@ -331,6 +331,36 @@ SCS3M.Agent = function(device) {
         handler(values);
     }
 
+    // Run a function that reads controller values.
+    // The function must use the reading() function which is passed as
+    // parameter. Everytime one of the controller values changes the
+    // function is re-run.
+    function Observatory(action) {
+        var watching = {};
+        var reading = function(group, control) {
+            var id = group + control;
+            if (!watching[id]) {
+                watchRegister(group, control, function() {
+                    action(reading);
+                });
+                watching[id] = true;
+            }
+            return engine.getParameter(group, control);
+        }
+        action(reading);
+    }
+
+    // Function to test whether the given channel is affecting
+    // main output.
+    function deckLiveGuard(reading, deckNo) {
+        var channel = "[Channel"+deckNo+"]";
+        var oppositeSide = (deckNo) % 2;
+        return reading(channel, 'play')
+            && reading(channel, 'volume') > 0
+            && reading(channel, 'pregain') > 0
+            && !reading(channel, 'mute')
+            && oppositeSide !== reading('[Master]', 'crossfader');
+    }
 
     // Send MIDI message to device
     // Param message: list of three MIDI bytes
@@ -761,8 +791,17 @@ SCS3M.Agent = function(device) {
                 var effectunit_enable = 'group_' + fxchannel + '_enable';
                 var effectunit_effect = '[EffectRack1_EffectUnit' + (tnr + 1) + '_Effect1]';
 
+                var liveAndWet = function() {
+                    return engine.getParameter(effectunit, 'mix')
+                        && deckLiveGuard(engine.getParameter, channelno);
+                };
+
                 if (fxHeldSide.held() || master.engaged()) {
-                    expect(softbutton.touch, toggle(effectunit, effectunit_enable));
+                    expect(softbutton.touch, function() {
+                        if (!liveAndWet()) {
+                            toggle(effectunit, effectunit_enable)();
+                        }
+                    });
                 } else {
                     expect(softbutton.touch, repatch(function() {
                         sideoverlay.engage(tnr);
@@ -787,15 +826,34 @@ SCS3M.Agent = function(device) {
                     // Select effect by touching top slider when button is held
                     // Otherwise the top slider controls effect wet/dry
                     if (touchsideheld.engaged(tnr)) {
-                        tell(part.pitch.meter.expand(0.3));
-                        expect(
-                            part.pitch.field.left.touch,
-                            setconst(effectunit, 'chain_selector', 1)
-                        );
-                        expect(
-                            part.pitch.field.right.touch,
-                            setconst(effectunit, 'chain_selector', -1)
-                        );
+                        var effectIsLive;
+                        Observatory(function(reading) {
+                            effectIsLive = false;
+                            if (reading(effectunit, 'mix') > 0) {
+                                for (var deckNo = 1; deckNo <= 4 && !effectIsLive; deckNo++) {
+                                    effectIsLive = reading(effectunit, 'group_[Channel'+deckNo+']_enable')
+                                                && deckLiveGuard(reading, deckNo);
+                                }
+                                if (!effectIsLive) {
+                                    effectIsLive = reading(effectunit, 'group_[Master]_enable');
+                                }
+                            }
+                            if (effectIsLive) {
+                                tell(part.pitch.meter.bar(0));
+                            } else {
+                                tell(part.pitch.meter.expand(0.3));
+                            }
+                        });
+                        expect(part.pitch.field.left.touch, function() {
+                            if (!effectIsLive) {
+                                setconst(effectunit, 'chain_selector', 1)();
+                            }
+                        });
+                        expect(part.pitch.field.right.touch, function() {
+                            if (!effectIsLive) {
+                                setconst(effectunit, 'chain_selector', -1)();
+                            }
+                        });
                     } else {
                         modeset(part.pitch.mode.absolute);
                         expect(part.pitch.slide, eqsideheld.choose(
