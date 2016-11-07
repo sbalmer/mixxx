@@ -234,6 +234,7 @@ SCS3M.Agent = function(device) {
     var loading = false;
     var throttling = false;
     var pipe = [];
+    var modepipe = [];
 
     // Handlers for received messages
     var receivers = {};
@@ -244,6 +245,7 @@ SCS3M.Agent = function(device) {
     function clear() {
         receivers = {};
         pipe = [];
+        modepipe = [];
 
         // I'd like to disconnect everything on clear, but that doesn't work when using closure callbacks, I guess I'd have to pass the callback function as string name
         // I'd have to invent function names for all handlers
@@ -335,7 +337,6 @@ SCS3M.Agent = function(device) {
     // Send MIDI message to device
     // Param message: list of three MIDI bytes
     // Param force: send value regardless of last recorded state
-    // Param extra: do not record message as last state
     // Returns whether the massage was sent
     // False is returned if the mesage was sent before.
     function send(message, force, extra) {
@@ -352,10 +353,8 @@ SCS3M.Agent = function(device) {
 
         midi.sendShortMsg(message[0], message[1], message[2]);
 
-        // Record message as sent, unless it as was a mode setting termination message
-        if (!extra) {
-            last[address] = message[2];
-        }
+        last[address] = message[2];
+
         return true;
     }
 
@@ -369,6 +368,36 @@ SCS3M.Agent = function(device) {
         send(message);
     }
 
+    // Send MIDI mode messages to device
+    // Param messages: list of two messages three byte values each
+    // Returns whether the massage was sent
+    function sendmode(messages) {
+        // Modeset messages are comprised of the actual modeset message and
+        // a termination message that must be sent after.
+        var mode= messages[0];
+        var termination = messages[1];
+
+	// Special SYSEX special messages are special
+        if (mode.length > 3) {
+            midi.sendSysexMsg(mode, mode.length);
+            return true;
+        }
+
+        var address = (mode[0] << 8) + mode[1];
+
+        if (last[address] === mode[2]) {
+            return false; // Not repeating same message
+        }
+
+        midi.sendShortMsg(mode[0], mode[1], mode[2]);
+        midi.sendShortMsg(termination[0], termination[1], termination[2]);
+
+        // Record message as sent
+        last[address] = mode[2];
+
+        return true;
+    }
+
     // Send modeset messages to the device
     //
     // messages: list of one or two messages to send
@@ -378,40 +407,33 @@ SCS3M.Agent = function(device) {
     // subsequent messages will be delayed to give the device some time to apply
     // the changes.
     function modeset(messages) {
-        var sent = true;
-
-        // Modeset messages are comprised of the actual modeset message and
-        // a termination message that must be sent after.
-        var message = messages[0];
-
-        if (message) {
-            if (message.length > 3) {
-                midi.sendSysexMsg(message, message.length);
-            } else {
-                sent = send(message);
-                if (sent && messages[1]) {
-                    // Only send termination message when modeset message was sent
-                    send(messages[1], true, true);
-                }
-            }
+        if (throttling) {
+            modepipe.push(messages);
+            return;
         }
+
+        var sent = sendmode(messages);
 
         if (sent) {
             // after modesetting, we have to wait for the device to settle
-            if (!throttling) {
-                throttling = engine.beginTimer(20, flushModeset);
-            }
+            throttling = engine.beginTimer(0, flush);
         }
     }
 
-    var flushModeset = function() {
-        var message;
+    var flush = function() {
+        var mode = modepipe.shift();
+      
+        if (mode) {
+            sendmode(mode);
+            return;
+        }
 
         // Now we can flush the rest of the messages.
         // On init, some controls are left unlit if the messages are sent
         // without delay. The causes are unclear. Sending only a few messages
         // per tick seems to work ok.
-        var limit = 5; // Determined experimentally
+        var message;
+        var limit = 5; // Determined experiementally
         while (pipe.length) {
             message = pipe.shift();
             send(message);
