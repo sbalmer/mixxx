@@ -753,8 +753,11 @@ SCS3M.Agent = function(device) {
             }
 
             if (sideoverlay.engaged('eq')) {
+	        modeset(part.eq.low.mode.relative);
+	        modeset(part.eq.mid.mode.relative);
+	        modeset(part.eq.high.mode.relative);
                 var eff = "[EqualizerRack1_" + channel + "_Effect1]";
-                var op = eqsideheld.choose(set, reset);
+                var op = eqsideheld.choose(budge, reset);
                 expect(part.eq.low.slide, op(eff, 'parameter1'));
                 expect(part.eq.mid.slide, op(eff, 'parameter2'));
                 expect(part.eq.high.slide, op(eff, 'parameter3'));
@@ -827,6 +830,9 @@ SCS3M.Agent = function(device) {
                         watch(effectunit, 'mix', patch(part.pitch.meter.bar));
                     }
 
+		    modeset(part.eq.low.mode.absolute);
+		    modeset(part.eq.mid.mode.absolute);
+		    modeset(part.eq.high.mode.absolute);
                     expect(part.eq.high.slide, fxHeldSide.choose(
                         set(effectunit_effect, 'parameter3'),
                         reset(effectunit_effect, 'parameter3')
