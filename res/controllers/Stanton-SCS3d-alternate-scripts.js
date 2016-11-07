@@ -1305,6 +1305,7 @@ SCS3D.Agent = function(device) {
             comm.sysex(device.modeset.button);
             tell(device.mode.trig.light.bits(trigset + 1));
             pitchPatch(channel);
+            beatJump(channel);
             deckLights();
 
             var i = 0;
