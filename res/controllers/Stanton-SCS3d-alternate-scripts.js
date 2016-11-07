@@ -1368,6 +1368,8 @@ SCS3D.Agent = function(device) {
     function beatJump(channel) {
         expect(device.top.left.touch, setConst(channel, 'beatjump_1_backward', 1));
         expect(device.top.right.touch, setConst(channel, 'beatjump_1_forward', 1));
+        expect(device.bottom.left.touch, setConst(channel, 'beatjump_16_backward', 1));
+        expect(device.bottom.right.touch, setConst(channel, 'beatjump_16_forward', 1));
     }
 
     function scratchpatch(channel, held) {
