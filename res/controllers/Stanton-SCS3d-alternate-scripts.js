@@ -1614,10 +1614,10 @@ SCS3D.Agent = function(device) {
         var activePitchMode = pitchMode[deck];
         var engagedMode = activePitchMode.engaged();
         var pitchButtons = {
-            'absrate': device.top.left,
-            'pitch': device.top.right,
+            'relrate': device.top.left,
             'rate': device.bottom.left,
-            'relpitch': device.bottom.right,
+            'relpitch': device.top.right,
+            'pitch': device.bottom.right,
         };
         for (var modeName in pitchButtons) {
             var pitchButton = pitchButtons[modeName];
@@ -1648,7 +1648,7 @@ SCS3D.Agent = function(device) {
                 });
             }
         },
-        absrate: function(channel, held) {
+        relrate: function(channel, held) {
             tell(device.pitch.light.red.on);
             tell(device.pitch.light.blue.off);
             watch(channel, 'rate', Centerbar(device.pitch.meter));
@@ -1656,7 +1656,7 @@ SCS3D.Agent = function(device) {
             if (held) {
                 expect(device.pitch.slide.abs, reset(channel, 'rate'));
             } else {
-                expect(device.pitch.slide.abs, set(channel, 'rate'));
+                expect(device.pitch.slide.rel, budge(channel, 'rate', 0.2));
             }
         },
         relpitch: function(channel, held) {
@@ -1690,10 +1690,10 @@ SCS3D.Agent = function(device) {
 
     // pitch slider mode per channel
     var pitchMode = {
-        0: Modeswitch('absrate', pitchModeMap),
-        1: Modeswitch('absrate', pitchModeMap),
-        2: Modeswitch('absrate', pitchModeMap),
-        3: Modeswitch('absrate', pitchModeMap)
+        0: Modeswitch('relrate', pitchModeMap),
+        1: Modeswitch('relrate', pitchModeMap),
+        2: Modeswitch('relrate', pitchModeMap),
+        3: Modeswitch('relrate', pitchModeMap)
     };
 
     var pitchPatch = function(channel) {
