@@ -977,12 +977,21 @@ SCS3D.Agent = function(device) {
 
     var buttons = [device.top.left, device.top.right, device.bottom.left, device.bottom.right];
 
+    // Show the selected deck by lighting the corresponding button.
+    // That is the same button that would be pressed to select that deck.
     var deckLights = function() {
         for (var i in buttons) {
             tell(buttons[i].light[deck === +i ? 'red' : 'black']);
         }
     };
 
+    /* Create a patch for controlling FX units
+     *
+     * Parameter nr selects the effect unit that will be controlled by this
+     * patch. Note how this is a constructor for a patch, you have to call it
+     * with an effect unit number and get the actual patch function back.
+     * Only when you call the returned patch function the patch takes effect.
+     */
     var FxPatch = function(nr) {
         return function(channel, held) {
             var effectunit = '[EffectRack1_EffectUnit' + (nr + 1) + ']';
