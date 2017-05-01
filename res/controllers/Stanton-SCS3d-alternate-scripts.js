@@ -13,6 +13,8 @@
 // Issues
 // - Each deck rembembers the mode it was in, confusing? Would it be better to
 //   keep the current mode on deck switch?
+// - Super knob on FX2 has hard cutover when sliding across bottom, ad dead zone
+// - Effects are now turned off when Mixxx starts, add control to turn them on? Hold-EQ/Button[1-4] to toggle?
 
 // Useful tinkering commands, channel reset and flat mode
 // amidi -p hw:1 -S F00001600200F7
