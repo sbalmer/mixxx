@@ -13,6 +13,8 @@
 // Issues
 // - Each deck rembembers the mode it was in, confusing? Would it be better to
 //   keep the current mode on deck switch?
+// - Super knob on FX2 has hard cutover when sliding across bottom, ad dead zone
+// - Effects are now turned off when Mixxx starts, add control to turn them on? Hold-EQ/Button[1-4] to toggle?
 
 // Useful tinkering commands, channel reset and flat mode
 // amidi -p hw:1 -S F00001600200F7
@@ -977,12 +979,21 @@ SCS3D.Agent = function(device) {
 
     var buttons = [device.top.left, device.top.right, device.bottom.left, device.bottom.right];
 
+    // Show the selected deck by lighting the corresponding button.
+    // That is the same button that would be pressed to select that deck.
     var deckLights = function() {
         for (var i in buttons) {
             tell(buttons[i].light[deck === +i ? 'red' : 'black']);
         }
     };
 
+    /* Create a patch for controlling FX units
+     *
+     * Parameter nr selects the effect unit that will be controlled by this
+     * patch. Note how this is a constructor for a patch, you have to call it
+     * with an effect unit number and get the actual patch function back.
+     * Only when you call the returned patch function the patch takes effect.
+     */
     var FxPatch = function(nr) {
         return function(channel, held) {
             var effectunit = '[EffectRack1_EffectUnit' + (nr + 1) + ']';
@@ -1305,6 +1316,7 @@ SCS3D.Agent = function(device) {
             comm.sysex(device.modeset.button);
             tell(device.mode.trig.light.bits(trigset + 1));
             pitchPatch(channel);
+            beatJump(channel);
             deckLights();
 
             var i = 0;
@@ -1367,6 +1379,8 @@ SCS3D.Agent = function(device) {
     function beatJump(channel) {
         expect(device.top.left.touch, setConst(channel, 'beatjump_1_backward', 1));
         expect(device.top.right.touch, setConst(channel, 'beatjump_1_forward', 1));
+        expect(device.bottom.left.touch, setConst(channel, 'beatjump_16_backward', 1));
+        expect(device.bottom.right.touch, setConst(channel, 'beatjump_16_forward', 1));
     }
 
     function scratchpatch(channel, held) {
@@ -1431,13 +1445,13 @@ SCS3D.Agent = function(device) {
     function vinylpatch(channel, held) {
         comm.sysex(device.modeset.circle);
         pitchPatch(channel);
-        beatJump(channel);
 
         // The four buttons select pitch slider mode when vinyl is held
         if (held) {
             pitchModeSelect();
             needleDrop(channel);
         } else {
+            beatJump(channel);
             deckLights();
 
             expect(device.slider.circle.slide.rel, function(value) {
@@ -1602,10 +1616,10 @@ SCS3D.Agent = function(device) {
         var activePitchMode = pitchMode[deck];
         var engagedMode = activePitchMode.engaged();
         var pitchButtons = {
-            'absrate': device.top.left,
-            'pitch': device.top.right,
+            'relrate': device.top.left,
             'rate': device.bottom.left,
-            'relpitch': device.bottom.right,
+            'relpitch': device.top.right,
+            'pitch': device.bottom.right,
         };
         for (var modeName in pitchButtons) {
             var pitchButton = pitchButtons[modeName];
@@ -1636,7 +1650,7 @@ SCS3D.Agent = function(device) {
                 });
             }
         },
-        absrate: function(channel, held) {
+        relrate: function(channel, held) {
             tell(device.pitch.light.red.on);
             tell(device.pitch.light.blue.off);
             watch(channel, 'rate', Centerbar(device.pitch.meter));
@@ -1644,7 +1658,7 @@ SCS3D.Agent = function(device) {
             if (held) {
                 expect(device.pitch.slide.abs, reset(channel, 'rate'));
             } else {
-                expect(device.pitch.slide.abs, set(channel, 'rate'));
+                expect(device.pitch.slide.rel, budge(channel, 'rate', 0.2));
             }
         },
         relpitch: function(channel, held) {
@@ -1678,10 +1692,10 @@ SCS3D.Agent = function(device) {
 
     // pitch slider mode per channel
     var pitchMode = {
-        0: Modeswitch('absrate', pitchModeMap),
-        1: Modeswitch('absrate', pitchModeMap),
-        2: Modeswitch('absrate', pitchModeMap),
-        3: Modeswitch('absrate', pitchModeMap)
+        0: Modeswitch('relrate', pitchModeMap),
+        1: Modeswitch('relrate', pitchModeMap),
+        2: Modeswitch('relrate', pitchModeMap),
+        3: Modeswitch('relrate', pitchModeMap)
     };
 
     var pitchPatch = function(channel) {
