@@ -758,7 +758,7 @@ SCS3M.Agent = function(device, backend) {
         };
     }
 
-    var master = Switch(); // Whether master key is held
+    var master = Switch(false, true); // Whether master key is held
     var deck = {
         left: HoldDelayedSwitch(1, 3), // off: channel1, on: channel3
         right: HoldDelayedSwitch(2, 4) // off: channel2, on: channel4
@@ -973,15 +973,11 @@ SCS3M.Agent = function(device, backend) {
         if (master.engaged()) {
             modeset(device.left.pitch.mode.absolute);
             watch(backend.headmix, patch(device.left.pitch.meter.centerbar));
-            expect(device.left.pitch.slide,
-                eqheld.left.engaged() ? backend.headmix.reset : backend.headmix.set
-            );
+            expect(device.left.pitch.slide, backend.headmix.set);
 
             modeset(device.right.pitch.mode.absolute);
             watch(backend.balance, patch(device.right.pitch.meter.centerbar));
-            expect(device.right.pitch.slide,
-                eqheld.right.engaged() ? backend.balance.reset : backend.balance.set
-            );
+            expect(device.right.pitch.slide, backend.balance.set);
 
             modeset(device.left.gain.mode.relative);
             watch(backend.headvolume, patch(device.left.gain.meter.centerbar));
