@@ -692,11 +692,6 @@ SCS3M.Agent = function(device, backend) {
                 return early();
             },
 
-            'late': function() {
-                if (!start) return;
-                return early();
-            },
-
             'held': function() {
                 return !!start;
             },
