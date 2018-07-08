@@ -620,6 +620,9 @@ SCS3M.Agent = function(device, backend) {
     // Map engine values in the range [0..1] to lights
     // translator maps from [0..1] to a midi message (three bytes)
     function patch(translator) {
+        if (typeof translator !== 'function') {
+            throw "ParamError: Expected function, got " + translator;
+        }
         return function(value) {
             tell(translator(value));
         };
