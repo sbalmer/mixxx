@@ -891,12 +891,12 @@ SCS3M.Agent = function(device, backend) {
                 var held = sideoverlay.held(tnr);
                 var enabled = effect.enabled.value();
 
-
                 if (sideoverlay.held('fx')) {
                     expect(softbutton.touch, effect.enabled.toggle);
-                    tell(softbutton.light[enabled ? 'red' : 'black']);
+                    watch(effect.enabled, function(enabled) { tell(softbutton.light[enabled ? 'red' : 'black']) });
                 } else {
                     expect(softbutton.touch, sideoverlay.hold(tnr, remap));
+                    expect(softbutton.release, repatch(sideoverlay.release));
                     tell(softbutton.light[sideoverlay.choice(tnr, 
                         enabled ? 'blue' : 'black', // not active
                         enabled ? 'purple' : 'red', // active
@@ -905,7 +905,6 @@ SCS3M.Agent = function(device, backend) {
                     ]);
                 }
 
-                expect(softbutton.release, repatch(sideoverlay.release));
                 if (sideoverlay.engaged(tnr)) {
                     var op = sideoverlay.choice('eq', 'set', false, 'reset');
                     modeset(part.eq.low.mode.absolute);
@@ -914,9 +913,9 @@ SCS3M.Agent = function(device, backend) {
                     expect(part.eq.low.slide, effect.parameter1[op]);
                     expect(part.eq.mid.slide, effect.parameter2[op]);
                     expect(part.eq.high.slide, effect.parameter3[op]);
-                    watch(effect.parameter1, patch(offcenter(part.eq.low.meter.centerbar)));
-                    watch(effect.parameter2, patch(offcenter(part.eq.mid.meter.centerbar)));
-                    watch(effect.parameter3, patch(offcenter(part.eq.high.meter.centerbar)));
+                    watch(effect.parameter1, patch(offcenter(part.eq.low.meter.needle)));
+                    watch(effect.parameter2, patch(offcenter(part.eq.mid.meter.needle)));
+                    watch(effect.parameter3, patch(offcenter(part.eq.high.meter.needle)));
                 }
 
                 // Select effect by touching top slider when button is held
