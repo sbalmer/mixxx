@@ -25,11 +25,17 @@ SCS3M = {
 };
 
 SCS3M.init = function(id) {
-    var device = SCS3M.Device();
-    var backend =  SCS3M.Backend(engine);
-    SCS3M.agent = SCS3M.Agent(device, backend);
+    // For reasons unclear to me, errors in init()
+    // are not reported
+    // Workaround: do the init later
+    timer = engine.beginTimer(100, function() {
+        engine.stopTimer(timer);
+        var device = SCS3M.Device();
+        var backend =  SCS3M.Backend(engine);
+        SCS3M.agent = SCS3M.Agent(device, backend);
 
-    SCS3M.agent.start();
+        SCS3M.agent.start();
+    });
 };
 
 SCS3M.shutdown = function() {
