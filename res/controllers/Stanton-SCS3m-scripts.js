@@ -297,7 +297,10 @@ SCS3M.Backend = function(engine) {
         var effect = {};
 
         effect.selector = EffectSelector(address);
+        effect.enabled = Control(address, 'enabled');
+        effect.meta = Control(address, 'meta');
         effect.superknob = Control(address, 'super1');
+
         effect.parameter1 = Control(address, 'parameter1');
         effect.parameter2 = Control(address, 'parameter2');
         effect.parameter3 = Control(address, 'parameter3');
@@ -319,6 +322,7 @@ SCS3M.Backend = function(engine) {
             [ Effect(base, 'Effect1')
             , Effect(base, 'Effect2')
             , Effect(base, 'Effect3')
+            , Effect(base, 'Effect4')
             ];
 
         chain.enable = function(channel) {
@@ -671,42 +675,6 @@ SCS3M.Agent = function(device, backend) {
         };
     }
 
-    function HoldLimit(limit) {
-        var start = false;
-
-        var early = function() {
-            return limit > new Date() - start;
-        };
-
-        return {
-            'hold': function() {
-                start = new Date();
-            },
-
-            'releaseTrigger': function(onEarly) {
-                return function() {
-                    if (!start) return;
-                    if (early()) {
-                        onEarly();
-                    }
-                    start = false;
-                };
-            },
-
-            'early': function() {
-                if (!start) return;
-                return early();
-            },
-
-            'held': function() {
-                return !!start;
-            },
-
-            'choose': function(normalVal, heldVal) {
-                return start ? heldVal : normalVal;
-            }
-        };
-    }
 
     // HoldDelayedSwitches can be engaged, and they can be held.
     // A switch that is held for less than 200 ms will toggle.
@@ -744,44 +712,62 @@ SCS3M.Agent = function(device, backend) {
         return sw;
     }
 
-    function Multiswitch(preset, initialSubMode) {
-        var engaged = preset;
-        var subMode = initialSubMode;
+    var MultiSwitch = function(preset) {
+        var current = preset;
+        var held = false;
+        var timer = false;
+        var next = false;
+
         return {
-            'engage': function(pos) {
-                engaged = pos;
-                if (engaged !== preset) {
-                    subMode = pos;
+            'hold': function(mode, onHeld) {
+                return function() {
+                    next = mode;
+                    if (timer) engine.stopTimer(timer);
+                    timer = engine.beginTimer(200, function() {
+                        engine.stopTimer(timer);
+                        timer = false;
+                        held = next;
+                        if (onHeld) onHeld();
+                    });
                 }
             },
-            'engageSub': function() {
-                engaged = subMode;
+
+            'release': function() {
+                if (timer) {
+                    engine.stopTimer(timer);
+                    timer = false;
+                    current = next;
+                }
+                held = false;
             },
-            'cancel': function() {
-                engaged = preset;
+
+            'engaged': function(mode) { return mode === current; },
+            'held': function(mode) { return mode === held; },
+            'either': function(mode, forOn, forOff) {
+                if (mode === current) return forOn;
+                return forOff;
             },
-            'engaged': function(pos) {
-                return engaged === pos;
-            },
-            'choose': function(pos, off, on) {
-                return (engaged === pos) ? on : off;
+            'choice': function(mode, forOff, forOn, forHeld) {
+                if (mode === held) return forHeld;
+                if (mode === current) return forOn;
+                return forOff;
             }
         };
     }
 
-    var master = Switch(false, true); // Whether master key is held
+    var master = Switch(); // Whether master key is held
     var deck = {
         left: HoldDelayedSwitch(1, 3), // off: channel1, on: channel3
         right: HoldDelayedSwitch(2, 4) // off: channel2, on: channel4
     };
 
-    var overlayA = Multiswitch('eq', 0);
-    var overlayB = Multiswitch('eq', SCS3M.eqModePerDeck ? 1 : 0);
+    var overlayA = MultiSwitch('eq');
+    var overlayB = MultiSwitch('eq');
     var overlayC;
     var overlayD;
     if (SCS3M.eqModePerDeck) {
-        overlayC = Multiswitch('eq', 2);
-        overlayD = Multiswitch('eq', 3);
+        overlayC = MultiSwitch('eq');
+        overlayD = MultiSwitch('eq');
     } else {
         overlayC = overlayA;
         overlayD = overlayB;
@@ -790,21 +776,6 @@ SCS3M.Agent = function(device, backend) {
     var overlay = {
         left: [overlayA, overlayC],
         right: [overlayB, overlayD],
-    };
-
-    var eqheld = {
-        left: Switch(false, true),
-        right: Switch(false, true)
-    };
-
-    var fxHeld = {
-        left: HoldLimit(200),
-        right: HoldLimit(200)
-    };
-
-    var touchheld = {
-        left: Multiswitch('none'),
-        right: Multiswitch('none')
     };
 
     function remap() {
@@ -837,8 +808,7 @@ SCS3M.Agent = function(device, backend) {
 
             var channelno = deck[side].choose(either(1, 2), either(3, 4));
             var channel = backend.channels[channelno];
-            var eqsideheld = eqheld[side];
-            var touchsideheld = touchheld[side];
+            var chain = backend.chains[channelno - 1];
             var sideoverlay = overlay[side][deckside.choose(0, 1)];
 
             // Light the corresponding deck (channel 1: A, channel 2: B, channel 3: C, channel 4: D)
@@ -863,22 +833,14 @@ SCS3M.Agent = function(device, backend) {
                 backend.channels[either(3, 4)].beat_active,
             ], patch(beatlight(part.deck.light, deckside.choose(0, 1), deckside.held())));
 
-            if (!master.engaged()) {
-                if (sideoverlay.engaged('eq')) {
-                    modeset(part.pitch.mode.relative);
-                    expect(part.pitch.slide, eqsideheld.choose(
-                        channel.quickeffect.superknob.varbudge(0.5),
-                        channel.quickeffect.superknob.reset
-                    ));
-                    watch(channel.quickeffect.superknob, offcenter(patch(part.pitch.meter.centerbar)));
-                }
-            }
-
+            expect(part.modes.eq.touch, sideoverlay.hold('eq', remap));
+            expect(part.modes.eq.release, repatch(sideoverlay.release));
+            tell(part.modes.eq.light[sideoverlay.choice('eq', 'blue', 'red', 'purple')]);
             if (sideoverlay.engaged('eq')) {
                 modeset(part.eq.low.mode.relative);
                 modeset(part.eq.mid.mode.relative);
                 modeset(part.eq.high.mode.relative);
-                var op = eqsideheld.choose('budge', 'reset');
+                var op = sideoverlay.choice('eq', false, 'budge', 'reset');
                 expect(part.eq.low.slide, channel.eq.parameter1[op]);
                 expect(part.eq.mid.slide, channel.eq.parameter2[op]);
                 expect(part.eq.high.slide, channel.eq.parameter3[op]);
@@ -886,109 +848,91 @@ SCS3M.Agent = function(device, backend) {
                 watch(channel.eq.parameter1, patch(offcenter(part.eq.low.meter.centerbar)));
                 watch(channel.eq.parameter2, patch(offcenter(part.eq.mid.meter.centerbar)));
                 watch(channel.eq.parameter3, patch(offcenter(part.eq.high.meter.centerbar)));
+
+                if (!master.engaged()) {
+                    modeset(part.pitch.mode.relative);
+                    expect(part.pitch.slide, sideoverlay.choice('eq', false,
+                        channel.quickeffect.superknob.varbudge(0.5),
+                        channel.quickeffect.superknob.reset
+                    ));
+                    watch(channel.quickeffect.superknob, offcenter(patch(part.pitch.meter.centerbar)));
+                }
+            } else {
+                if (!master.engaged()) {
+                    modeset(part.pitch.mode.absolute);
+                    expect(part.pitch.slide, sideoverlay.held('eq') ? chain.superknob.reset : chain.superknob.set);
+                    watch(chain.superknob, patch(part.pitch.meter.needle));
+                }
             }
 
-            expect(part.modes.eq.touch, repatch(function() {
-                eqsideheld.engage();
-                sideoverlay.cancel();
-            }));
-            expect(part.modes.eq.release, repatch(eqsideheld.cancel));
-            tell(part.modes.eq.light[eqsideheld.choose(sideoverlay.choose('eq', 'blue', 'red'), 'purple')]);
+            expect(part.modes.fx.touch, sideoverlay.hold('fx', remap));
+            expect(part.modes.fx.release, repatch(sideoverlay.release));
+            tell(part.modes.fx.light[sideoverlay.choice('fx', 'blue', 'red', 'purple')]);
+            if (sideoverlay.engaged('fx')) {
+                modeset(part.eq.low.mode.absolute);
+                modeset(part.eq.mid.mode.absolute);
+                modeset(part.eq.high.mode.absolute);
+                var op = sideoverlay.choice('eq', 'set', false, 'reset');
+                expect(part.eq.low.slide, chain.effects[0].meta[op]);
+                expect(part.eq.mid.slide, chain.effects[1].meta[op]);
+                expect(part.eq.high.slide, chain.effects[2].meta[op]);
 
-            var fxHeldSide = fxHeld[side];
+                watch(chain.effects[0].meta, patch(part.eq.low.meter.needle));
+                watch(chain.effects[1].meta, patch(part.eq.mid.meter.needle));
+                watch(chain.effects[2].meta, patch(part.eq.high.meter.needle));
+            }
 
-            var fxMap = function(tnr) {
+            var touchMap = function(tnr) {
+                var effect = chain.effects[tnr];
                 var softbutton = part.touches[tnr];
-                var fxchannel = channel;
-                if (master.engaged()) {
-                    fxchannel = either(
-                        backend.channels.headphone,
-                        backend.channels.master);
-                }
+                var held = sideoverlay.held(tnr);
+                var enabled = effect.enabled.value();
 
-                var chain = backend.chains[tnr];
-                var effect = chain.effects[0];
 
-                if (fxHeldSide.held() || master.engaged()) {
-                    expect(softbutton.touch, chain.enable(fxchannel).toggle);
+                if (sideoverlay.held('fx')) {
+                    expect(softbutton.touch, effect.enabled.toggle);
+                    tell(softbutton.light[enabled ? 'red' : 'black']);
                 } else {
-                    expect(softbutton.touch, repatch(function() {
-                        sideoverlay.engage(tnr);
-                        touchsideheld.engage(tnr);
-                    }));
-                }
-                expect(softbutton.release, repatch(touchsideheld.cancel));
-
-                if (sideoverlay.engaged(tnr)) {
-                    watch(chain.enable(fxchannel), binarylight(
-                        softbutton.light.blue,
-                        softbutton.light.purple)
-                    );
-                } else {
-                    watch(chain.enable(fxchannel), binarylight(
-                        softbutton.light.black,
-                        softbutton.light.red)
-                    );
+                    expect(softbutton.touch, sideoverlay.hold(tnr, remap));
+                    tell(softbutton.light[sideoverlay.choice(tnr, 
+                        enabled ? 'blue' : 'black', // not active
+                        enabled ? 'purple' : 'red', // active
+                        'purple' // held
+                        )
+                    ]);
                 }
 
+                expect(softbutton.release, repatch(sideoverlay.release));
                 if (sideoverlay.engaged(tnr)) {
-                    // Select effect by touching top slider when button is held
-                    // Otherwise the top slider controls effect wet/dry
-                    if (touchsideheld.engaged(tnr)) {
-                        tell(part.pitch.meter.expand(0.3));
-                        expect(
-                            part.pitch.field.left.touch,
-                            effect.selector.next
-                        );
-                        expect(
-                            part.pitch.field.right.touch,
-                            effect.selector.prev
-                        );
-                    } else {
-                        modeset(part.pitch.mode.absolute);
-                        expect(part.pitch.slide, eqsideheld.choose(
-                            chain.mix.set,
-                            chain.mix.reset
-                        ));
-                        watch(chain.mix, patch(part.pitch.meter.bar));
-                    }
-
+                    var op = sideoverlay.choice('eq', 'set', false, 'reset');
                     modeset(part.eq.low.mode.absolute);
                     modeset(part.eq.mid.mode.absolute);
                     modeset(part.eq.high.mode.absolute);
-                    expect(part.eq.high.slide, fxHeldSide.choose(
-                        effect.parameter3.set,
-                        effect.parameter3.reset
-                    ));
-                    expect(part.eq.mid.slide, fxHeldSide.choose(
-                        effect.parameter2.set,
-                        effect.parameter2.reset
-                    ));
-                    expect(part.eq.low.slide, fxHeldSide.choose(
-                        effect.parameter1.set,
-                        effect.parameter1.reset
-                    ));
-                    watch(effect.parameter3, patch(part.eq.high.meter.needle));
-                    watch(effect.parameter2, patch(part.eq.mid.meter.needle));
-                    watch(effect.parameter1, patch(part.eq.low.meter.needle));
+                    expect(part.eq.low.slide, effect.parameter1[op]);
+                    expect(part.eq.mid.slide, effect.parameter2[op]);
+                    expect(part.eq.high.slide, effect.parameter3[op]);
+                    watch(effect.parameter1, patch(offcenter(part.eq.low.meter.centerbar)));
+                    watch(effect.parameter2, patch(offcenter(part.eq.mid.meter.centerbar)));
+                    watch(effect.parameter3, patch(offcenter(part.eq.high.meter.centerbar)));
+                }
+
+                // Select effect by touching top slider when button is held
+                if (held) {
+                    tell(part.pitch.meter.expand(0.3));
+                    expect(
+                        part.pitch.field.left.touch,
+                        effect.selector.next
+                    );
+                    expect(
+                        part.pitch.field.right.touch,
+                        effect.selector.prev
+                    );
                 }
             };
 
             for (var tnr = 0; tnr < 4; tnr++) {
-                fxMap(tnr);
+                touchMap(tnr);
             }
-
-            expect(part.modes.fx.touch,
-                repatch(fxHeldSide.hold)
-            );
-            expect(part.modes.fx.release,
-                repatch(fxHeldSide.releaseTrigger(sideoverlay.engageSub))
-            );
-            tell(part.modes.fx.light[fxHeldSide.choose(
-                sideoverlay.choose('eq', 'red', 'blue'),
-                'purple'
-            )]);
-
 
             if (!master.engaged()) {
                 if (deckside.held()) {
