@@ -9,6 +9,7 @@
 /* jshint -W097                                                       */
 /* jshint -W084                                                       */
 /* jshint laxbreak: true                                              */
+/* jshint laxcomma: true                                              */
 ////////////////////////////////////////////////////////////////////////
 
 // manually test messages
@@ -24,9 +25,11 @@ SCS3M = {
 };
 
 SCS3M.init = function(id) {
-    this.device = this.Device();
-    this.agent = this.Agent(this.device);
-    this.agent.start();
+    var device = SCS3M.Device();
+    var backend =  SCS3M.Backend(engine);
+    SCS3M.agent = SCS3M.Agent(device, backend);
+
+    SCS3M.agent.start();
 };
 
 SCS3M.shutdown = function() {
@@ -213,6 +216,168 @@ SCS3M.Device = function() {
     };
 };
 
+
+
+SCS3M.Backend = function(engine) {
+    var Control = function(address, name) {
+        var control = {};
+
+        control.id = address + "." + name;
+
+        // Absolute
+        control.set = function(value) {
+            engine.setParameter(address, name,
+                value / 127
+            );
+        };
+
+        control.setValue = function(value) {
+            engine.setValue(address, name, value);
+        };
+
+        // Relative
+        control.varbudge = function(factor) {
+            var mult = factor / 128;
+
+            return function(offset) {
+                engine.setValue(address, name,
+                    engine.getValue(address, name) + (offset - 64) * mult
+                );
+            };
+        };
+
+        control.budge = control.varbudge(1);
+
+        control.fix = function(value) {
+            return function() {
+                engine.setParameter(address, name, value);
+            };
+        };
+
+        control.reset = function() {
+            engine.reset(address, name);
+        };
+
+        control.toggle = function() {
+            engine.setValue(address, name, !engine.getValue(address, name));
+        };
+
+        control.value = function() {
+            return engine.getParameter(address, name);
+        };
+
+        control.watch = function(handler) {
+            engine.connectControl(address, name, handler);
+        };
+
+        control.trigger = function() {
+            engine.trigger(address, name);
+        };
+
+        return control;
+    };
+
+    var EffectSelector = function(address) {
+        return (
+            { 'next': Control(address, 'next_effect').fix(1)
+            , 'prev': Control(address, 'prev_effect').fix(1)
+            }
+        );
+    };
+
+    var Effect = function(base, name) {
+        // Example: [EffectRack1_EffectUnit1_Effect1]
+        var address = '[' + base + '_' + name + ']';
+        var effect = {};
+
+        effect.selector = EffectSelector(address);
+        effect.superknob = Control(address, 'super1');
+        effect.parameter1 = Control(address, 'parameter1');
+        effect.parameter2 = Control(address, 'parameter2');
+        effect.parameter3 = Control(address, 'parameter3');
+
+        return effect;
+    };
+
+    var Chain = function(root, unitaddress) {
+        var base = root + '_' + unitaddress;
+
+        // Example: [EffectRack1_EffectUnit1]
+        var address = '[' + base + ']';
+
+        var chain = {};
+
+        chain.mix = Control(address, 'mix');
+        chain.superknob = Control(address, 'super1');
+        chain.effects =
+            [ Effect(base, 'Effect1')
+            , Effect(base, 'Effect2')
+            , Effect(base, 'Effect3')
+            ];
+
+        chain.enable = function(channel) {
+            return Control(address, 'group_' + channel.address + '_enable');
+        };
+
+        return chain;
+    };
+
+    var Channel = function(base) {
+        var address = '[' + base + ']';
+        var channel = {};
+        channel.address = address;
+
+        channel.pregain = Control(address, 'pregain');
+        channel.volume = Control(address, 'volume');
+        channel.pfl = Control(address, 'pfl');
+        channel.vumeter = Control(address, 'VuMeter');
+        channel.vumeter_l = Control('[Master]', 'VuMeterL');
+        channel.vumeter_r = Control('[Master]', 'VuMeterR');
+
+        // Example address: [QuickEffectRack1_[Channel1]]
+        channel.quickeffect = Effect('QuickEffectRack1', address);
+
+        // Example address: [EqualizerRack1_[Channel1]_Effect1]
+        channel.eq = Effect("EqualizerRack1", address + "_Effect1");
+
+        channel.beat_active = Control(address, "beat_active");
+        channel.playposition = Control(address, "playposition");
+
+        return channel;
+    };
+
+    var backend = {};
+    backend.channels =
+        { '1': Channel('Channel1')
+        , '2': Channel('Channel2')
+        , '3': Channel('Channel3')
+        , '4': Channel('Channel4')
+        , 'headphone': Channel('Headphone')
+        , 'master': Channel('Master')
+        };
+
+    backend.chains =
+        [ Chain('EffectRack1', 'EffectUnit1')
+        , Chain('EffectRack1', 'EffectUnit2')
+        , Chain('EffectRack1', 'EffectUnit3')
+        , Chain('EffectRack1', 'EffectUnit4')
+        ];
+
+    backend.crossfader = Control('[Master]', 'crossfader');
+    backend.headmix    = Control('[Master]', 'headMix');
+    backend.headvolume = Control('[Master]', 'headVolume');
+    backend.balance    = Control('[Master]', 'balance');
+
+    backend.overload = Control('[Master]', 'audio_latency_overload');
+
+    // HACK HACK HACK This control is used to sync deck state with SCS3d devices
+    backend.deck_sync = Control('[PreviewDeck1]', 'quantize');
+
+    return backend;
+};
+
+
+
 // debugging helper
 var printmess = function(message, text) {
     var i;
@@ -224,7 +389,9 @@ var printmess = function(message, text) {
     print("Midi " + s + (text ? ' ' + text : ''));
 };
 
-SCS3M.Agent = function(device) {
+
+
+SCS3M.Agent = function(device, backend) {
     // Cache last sent bytes to avoid sending duplicates.
     // The second byte of each message (controller id) is used as key to hold
     // the last sent message for each controller.
@@ -275,28 +442,25 @@ SCS3M.Agent = function(device) {
         receivers[address] = handler;
     }
 
-    function watchRegister(channel, control, handler) {
-        // Indirection through a registry that keeps all watched controls
-        var ctrl = channel + control;
-
-        if (!watched[ctrl]) {
-            watched[ctrl] = [];
-            engine.connectControl(channel, control, function(value, group, control) {
-                var handlers = watched[ctrl];
+    function watchRegister(control, handler) {
+        if (!watched[control.id]) {
+            watched[control.id] = [];
+            control.watch(function() {
+                var handlers = watched[control.id];
                 for (var i in handlers) {
                     handlers[i]();
                 }
             });
         }
 
-        watched[ctrl].push(handler);
+        watched[control.id].push(handler);
     }
 
     // Register a handler for changes in engine values
     // This is an abstraction over engine.getParameter()
-    function watch(channel, control, handler) {
-        watchRegister(channel, control, function() {
-            handler(engine.getParameter(channel, control));
+    function watch(control, handler) {
+        watchRegister(control, function() {
+            handler(control.value());
         });
 
         if (loading) {
@@ -308,21 +472,19 @@ SCS3M.Agent = function(device) {
             handler(-100);
         }
 
-        engine.trigger(channel, control);
+        control.trigger();
     }
 
     // Register a handler for multiple engine values. It will be called
     // everytime one of the values changes.
-    // controls: list of channel/control pairs to watch
+    // controls: list of controls to watch
     // handler: will receive list of control values as parameter in same order
     function watchmulti(controls, handler) {
         var values = [];
-        var watchControl = function(controlpos, controlgroup) {
-            var channel = controlgroup[0];
-            var control = controlgroup[1];
-            values[controlpos] = engine.getParameter(channel, control);
-            watchRegister(channel, control, function() {
-                values[controlpos] = engine.getParameter(channel, control);
+        var watchControl = function(controlpos, control) {
+            values[controlpos] = control.value();
+            watchRegister(control, function() {
+                values[controlpos] = control.value();
                 handler(values);
             });
         };
@@ -475,47 +637,7 @@ SCS3M.Agent = function(device) {
         };
     }
 
-    // absolute control
-    function set(channel, control) {
-        return function(value) {
-            engine.setParameter(channel, control,
-                value / 127
-            );
-        };
-    }
-
-    function setconst(channel, control, value) {
-        return function() {
-            engine.setParameter(channel, control, value);
-        };
-    }
-
-    function reset(channel, control) {
-        return function() {
-            engine.reset(channel, control);
-        };
-    }
-
-    // relative control
-    function budge(channel, control, factor) {
-        if (factor === undefined) factor = 1;
-        var mult = factor / 128;
-
-        return function(offset) {
-            engine.setValue(channel, control,
-                engine.getValue(channel, control) + (offset - 64) * mult
-            );
-        };
-    }
-
-    // switch
-    function toggle(channel, control) {
-        return function() {
-            engine.setValue(channel, control, !engine.getValue(channel, control));
-        };
-    }
-
-    function Switch() {
+    function Switch(off, on) {
         var engaged = false;
 
         return {
@@ -535,7 +657,7 @@ SCS3M.Agent = function(device) {
                 engaged = !engaged;
             },
             'engaged': function() {
-                return engaged;
+                return engaged ? on : off;
             },
             'choose': function(off, on) {
                 return engaged ? on : off;
@@ -588,8 +710,8 @@ SCS3M.Agent = function(device) {
     // HoldDelayedSwitches can be engaged, and they can be held.
     // A switch that is held for less than 200 ms will toggle.
     // After 200ms it will enter held-mode.
-    function HoldDelayedSwitch() {
-        var sw = Switch();
+    function HoldDelayedSwitch(off, on) {
+        var sw = Switch(off, on);
 
         var held = false;
         var heldBegin = false;
@@ -646,10 +768,10 @@ SCS3M.Agent = function(device) {
         };
     }
 
-    var master = Switch(); // Whether master key is held
+    var master = Switch(false, true); // Whether master key is held
     var deck = {
-        left: HoldDelayedSwitch(), // off: channel1, on: channel3
-        right: HoldDelayedSwitch() // off: channel2, on: channel4
+        left: HoldDelayedSwitch(1, 3), // off: channel1, on: channel3
+        right: HoldDelayedSwitch(2, 4) // off: channel2, on: channel4
     };
 
     var overlayA = Multiswitch('eq', 0);
@@ -670,8 +792,8 @@ SCS3M.Agent = function(device) {
     };
 
     var eqheld = {
-        left: Switch(),
-        right: Switch()
+        left: Switch(false, true),
+        right: Switch(false, true)
     };
 
     var fxHeld = {
@@ -713,8 +835,7 @@ SCS3M.Agent = function(device) {
             }
 
             var channelno = deck[side].choose(either(1, 2), either(3, 4));
-            var channel = '[Channel' + channelno + ']';
-            var effectchannel = '[QuickEffectRack1_' + channel + ']';
+            var channel = backend.channels[channelno];
             var eqsideheld = eqheld[side];
             var touchsideheld = touchheld[side];
             var sideoverlay = overlay[side][deckside.choose(0, 1)];
@@ -737,18 +858,18 @@ SCS3M.Agent = function(device) {
                 };
             }
             watchmulti([
-                ['[Channel' + either(1, 2) + ']', 'beat_active'],
-                ['[Channel' + either(3, 4) + ']', 'beat_active'],
+                backend.channels[either(1, 2)].beat_active,
+                backend.channels[either(3, 4)].beat_active,
             ], patch(beatlight(part.deck.light, deckside.choose(0, 1), deckside.held())));
 
             if (!master.engaged()) {
                 if (sideoverlay.engaged('eq')) {
                     modeset(part.pitch.mode.relative);
                     expect(part.pitch.slide, eqsideheld.choose(
-                        budge(effectchannel, 'super1', 0.5),
-                        reset(effectchannel, 'super1')
+                        channel.quickeffect.superknob.varbudge(0.5),
+                        channel.quickeffect.superknob.reset
                     ));
-                    watch(effectchannel, 'super1', offcenter(patch(part.pitch.meter.centerbar)));
+                    watch(channel.quickeffect.superknob, offcenter(patch(part.pitch.meter.centerbar)));
                 }
             }
 
@@ -756,15 +877,14 @@ SCS3M.Agent = function(device) {
                 modeset(part.eq.low.mode.relative);
                 modeset(part.eq.mid.mode.relative);
                 modeset(part.eq.high.mode.relative);
-                var eff = "[EqualizerRack1_" + channel + "_Effect1]";
-                var op = eqsideheld.choose(budge, reset);
-                expect(part.eq.low.slide, op(eff, 'parameter1'));
-                expect(part.eq.mid.slide, op(eff, 'parameter2'));
-                expect(part.eq.high.slide, op(eff, 'parameter3'));
+                var op = eqsideheld.choose('budge', 'reset');
+                expect(part.eq.low.slide, channel.eq.parameter1[op]);
+                expect(part.eq.mid.slide, channel.eq.parameter2[op]);
+                expect(part.eq.high.slide, channel.eq.parameter3[op]);
 
-                watch(eff, 'parameter1', patch(offcenter(part.eq.low.meter.centerbar)));
-                watch(eff, 'parameter2', patch(offcenter(part.eq.mid.meter.centerbar)));
-                watch(eff, 'parameter3', patch(offcenter(part.eq.high.meter.centerbar)));
+                watch(channel.eq.parameter1, patch(offcenter(part.eq.low.meter.centerbar)));
+                watch(channel.eq.parameter2, patch(offcenter(part.eq.mid.meter.centerbar)));
+                watch(channel.eq.parameter3, patch(offcenter(part.eq.high.meter.centerbar)));
             }
 
             expect(part.modes.eq.touch, repatch(function() {
@@ -780,14 +900,16 @@ SCS3M.Agent = function(device) {
                 var softbutton = part.touches[tnr];
                 var fxchannel = channel;
                 if (master.engaged()) {
-                    fxchannel = either('[Headphone]', '[Master]');
+                    fxchannel = either(
+                        backend.channels.headphone,
+                        backend.channels.master);
                 }
-                var effectunit = '[EffectRack1_EffectUnit' + (tnr + 1) + ']';
-                var effectunit_enable = 'group_' + fxchannel + '_enable';
-                var effectunit_effect = '[EffectRack1_EffectUnit' + (tnr + 1) + '_Effect1]';
+
+                var chain = backend.chains[tnr];
+                var effect = chain.effects[0];
 
                 if (fxHeldSide.held() || master.engaged()) {
-                    expect(softbutton.touch, toggle(effectunit, effectunit_enable));
+                    expect(softbutton.touch, chain.enable(fxchannel).toggle);
                 } else {
                     expect(softbutton.touch, repatch(function() {
                         sideoverlay.engage(tnr);
@@ -797,12 +919,12 @@ SCS3M.Agent = function(device) {
                 expect(softbutton.release, repatch(touchsideheld.cancel));
 
                 if (sideoverlay.engaged(tnr)) {
-                    watch(effectunit, effectunit_enable, binarylight(
+                    watch(chain.enable(fxchannel), binarylight(
                         softbutton.light.blue,
                         softbutton.light.purple)
                     );
                 } else {
-                    watch(effectunit, effectunit_enable, binarylight(
+                    watch(chain.enable(fxchannel), binarylight(
                         softbutton.light.black,
                         softbutton.light.red)
                     );
@@ -815,39 +937,39 @@ SCS3M.Agent = function(device) {
                         tell(part.pitch.meter.expand(0.3));
                         expect(
                             part.pitch.field.left.touch,
-                            setconst(effectunit, 'chain_selector', 1)
+                            effect.selector.next
                         );
                         expect(
                             part.pitch.field.right.touch,
-                            setconst(effectunit, 'chain_selector', -1)
+                            effect.selector.prev
                         );
                     } else {
                         modeset(part.pitch.mode.absolute);
                         expect(part.pitch.slide, eqsideheld.choose(
-                            set(effectunit, 'mix'),
-                            reset(effectunit, 'mix')
+                            chain.mix.set,
+                            chain.mix.reset
                         ));
-                        watch(effectunit, 'mix', patch(part.pitch.meter.bar));
+                        watch(chain.mix, patch(part.pitch.meter.bar));
                     }
 
                     modeset(part.eq.low.mode.absolute);
                     modeset(part.eq.mid.mode.absolute);
                     modeset(part.eq.high.mode.absolute);
                     expect(part.eq.high.slide, fxHeldSide.choose(
-                        set(effectunit_effect, 'parameter3'),
-                        reset(effectunit_effect, 'parameter3')
+                        effect.parameter3.set,
+                        effect.parameter3.reset
                     ));
                     expect(part.eq.mid.slide, fxHeldSide.choose(
-                        set(effectunit_effect, 'parameter2'),
-                        reset(effectunit_effect, 'parameter2')
+                        effect.parameter2.set,
+                        effect.parameter2.reset
                     ));
                     expect(part.eq.low.slide, fxHeldSide.choose(
-                        set(effectunit_effect, 'parameter1'),
-                        reset(effectunit_effect, 'parameter1')
+                        effect.parameter1.set,
+                        effect.parameter1.reset
                     ));
-                    watch(effectunit_effect, 'parameter3', patch(part.eq.high.meter.needle));
-                    watch(effectunit_effect, 'parameter2', patch(part.eq.mid.meter.needle));
-                    watch(effectunit_effect, 'parameter1', patch(part.eq.low.meter.needle));
+                    watch(effect.parameter3, patch(part.eq.high.meter.needle));
+                    watch(effect.parameter2, patch(part.eq.mid.meter.needle));
+                    watch(effect.parameter1, patch(part.eq.low.meter.needle));
                 }
             };
 
@@ -871,36 +993,30 @@ SCS3M.Agent = function(device) {
                 if (deckside.held()) {
                     modeset(part.gain.mode.relative);
                     expect(part.gain.slide, eqsideheld.choose(
-                        budge(channel, 'pregain'),
-                        reset(channel, 'pregain')
+                        channel.pregain.budge,
+                        channel.pregain.reset
                     ));
-                    watch(channel, 'pregain', patch(offcenter(part.gain.meter.needle)));
+                    watch(channel.pregain, patch(offcenter(part.gain.meter.needle)));
                 } else {
                     modeset(part.gain.mode.absolute);
-                    expect(part.gain.slide, set(channel, 'volume'));
-                    watch(channel, 'volume', patch(part.gain.meter.bar));
+                    expect(part.gain.slide, channel.volume.set);
+                    watch(channel.volume, patch(part.gain.meter.bar));
                 }
             }
 
-            watch(channel, 'pfl', binarylight(part.phones.light.blue, part.phones.light.red));
-            expect(part.phones.touch, toggle(channel, 'pfl'));
-
-            if (deckside.held()) {
-                expect(device.crossfader.slide, set(channel, "playposition"));
-                watch(channel, "playposition", patch(device.crossfader.meter.needle));
-            }
+            watch(channel.pfl, binarylight(part.phones.light.blue, part.phones.light.red));
+            expect(part.phones.touch, channel.pfl.toggle);
 
             if (!master.engaged()) {
-                watch(channel, 'VuMeter', vupatch(part.meter.bar));
+                watch(channel.vumeter, vupatch(part.meter.bar));
             }
         }
 
         // Light the logo and let it go out to signal an overload
-        watch("[Master]", 'audio_latency_overload', binarylight(
+        watch(backend.overload, binarylight(
             device.logo.on,
             device.logo.off
         ));
-
         Side('left');
         Side('right');
 
@@ -909,48 +1025,62 @@ SCS3M.Agent = function(device) {
         expect(device.master.release, repatch(master.cancel));
         if (master.engaged()) {
             modeset(device.left.pitch.mode.absolute);
-            watch("[Master]", "headMix", patch(device.left.pitch.meter.centerbar));
+            watch(backend.headmix, patch(device.left.pitch.meter.centerbar));
             expect(device.left.pitch.slide,
-                eqheld.left.engaged() ? reset('[Master]', 'headMix') : set('[Master]', 'headMix')
+                eqheld.left.engaged() ? backend.headmix.reset : backend.headmix.set
             );
 
             modeset(device.right.pitch.mode.absolute);
-            watch("[Master]", "balance", patch(device.right.pitch.meter.centerbar));
+            watch(backend.balance, patch(device.right.pitch.meter.centerbar));
             expect(device.right.pitch.slide,
-                eqheld.right.engaged() ? reset('[Master]', 'balance') : set('[Master]', 'balance')
+                eqheld.right.engaged() ? backend.balance.reset : backend.balance.set
             );
 
             modeset(device.left.gain.mode.relative);
-            watch("[Master]", "headVolume", patch(device.left.gain.meter.centerbar));
-            expect(device.left.gain.slide, budge('[Master]', 'headVolume'));
+            watch(backend.headvolume, patch(device.left.gain.meter.centerbar));
+            expect(device.left.gain.slide, backend.headvolume.budge);
 
+            var masterch = backend.channels.master;
             modeset(device.right.gain.mode.relative);
-            watch("[Master]", "volume", patch(device.right.gain.meter.centerbar));
-            expect(device.right.gain.slide, budge('[Master]', 'volume'));
+            watch(masterch.volume, patch(device.right.gain.meter.centerbar));
+            expect(device.right.gain.slide, masterch.volume.budge);
 
-            watch("[Master]", "VuMeterL", vupatch(device.left.meter.bar));
-            watch("[Master]", "VuMeterR", vupatch(device.right.meter.bar));
+            watch(masterch.vumeter_l, vupatch(device.left.meter.bar));
+            watch(masterch.vumeter_r, vupatch(device.right.meter.bar));
         }
 
-        if (deck.left.held() || deck.right.held()) {
-            // Needledrop handled in Side()
+        var crossfade = function() {
+            expect(device.crossfader.slide, backend.crossfader.set);
+            watch(backend.crossfader, patch(device.crossfader.meter.centerbar));
+        };
+
+        var needledrop = function(channel) {
+            expect(device.crossfader.slide, channel.playposition.set);
+            watch(channel.playposition, patch(device.crossfader.meter.needle));
+        };
+
+        if (deck.left.held()) {
+            needledrop(backend.channels[deck.left.engaged()]);
+        } else if (deck.right.held()) {
+            needledrop(backend.channels[deck.right.engaged()]);
         } else {
-            expect(device.crossfader.slide, set("[Master]", "crossfader"));
-            watch("[Master]", "crossfader", patch(device.crossfader.meter.centerbar));
+            crossfade();
         }
 
         // Communicate currently selected channel of each deck so SCS3d can read it
         // THIS USES A CONTROL FOR ULTERIOR PURPOSES AND IS VERY NAUGHTY INDEED
-        engine.setValue('[PreviewDeck1]', 'quantize',
+        backend.deck_sync.setValue(
             0x4 // Setting bit three communicates that we're sending deck state
-            | deck.left.engaged() // left side is in bit one
-            | deck.right.engaged() << 1 // right side bit two
+            | deck.left.choose(0, 1) // left side is in bit one
+            | deck.right.choose(0, 2) // right side bit two
         );
-        watch('[PreviewDeck1]', 'quantize', function(deckState) {
+        watch(backend.deck_sync, function(deckState) {
             var changed = deck.left.change(deckState & 1) || deck.right.change(deckState & 2);
             if (changed) repatch(function() {})();
         });
     }
+
+
 
     return {
         start: function() {
